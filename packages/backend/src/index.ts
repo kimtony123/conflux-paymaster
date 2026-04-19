@@ -233,6 +233,10 @@ app.post("/api/paymaster/sign", async (req: Request, res: Response) => {
       let freeTierInfo = null;
       try {
         const dapp = await db.findDappByApiKey(apiKey);
+        if (!dapp) {
+          return res.status(401).json({ error: "Invalid API key" });
+        }
+        
         if (dapp) {
           const dappBalance = BigInt(dapp.balance_wei || 0);
           const freeTierCheck = await db.checkAndUseFreeTier(dapp.id);
