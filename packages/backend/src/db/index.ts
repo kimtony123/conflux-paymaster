@@ -18,6 +18,9 @@ export interface Dapp {
   id: string;
   owner_address: string;
   name: string;
+  project_name: string;
+  project_type: string;
+  description: string;
   api_key: string;
   paymaster_address: string | null;
   balance_wei: bigint;
@@ -69,17 +72,35 @@ export async function findDappByApiKey(apiKey: string): Promise<Dapp | null> {
   return result.rows[0] || null;
 }
 
-export async function createDapp(ownerAddress: string, name: string = "My dApp"): Promise<Dapp> {
+export async function createDapp(
+  ownerAddress: string, 
+  projectName: string = "My dApp",
+  projectType: string = "Other",
+  description: string = ""
+): Promise<Dapp> {
   if (!pool) throw new Error("Database not configured");
   
   const apiKey = generateApiKey();
   const result = await pool.query(
-    `INSERT INTO dapps (owner_address, name, api_key, balance_wei, status, created_at, updated_at)
-     VALUES ($1, $2, $3, 0, 'active', NOW(), NOW())
+    `INSERT INTO dapps (owner_address, project_name, project_type, description, name, api_key, balance_wei, status, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, 0, 'active', NOW(), NOW())
      RETURNING *`,
-    [ownerAddress.toLowerCase(), name, apiKey]
+    [ownerAddress.toLowerCase(), projectName, projectType, description, projectName, apiKey]
   );
   return result.rows[0];
+}
+
+export async function updateDappDetails(
+  dappId: string,
+  projectName: string,
+  projectType: string,
+  description: string
+): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    `UPDATE dapps SET project_name = $1, project_type = $2, description = $3, updated_at = NOW() WHERE id = $4`,
+    [projectName, projectType, description, dappId]
+  );
 }
 
 export async function getDappById(id: string): Promise<Dapp | null> {
@@ -235,6 +256,9 @@ export async function initDatabase(): Promise<void> {
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       owner_address VARCHAR(42) UNIQUE NOT NULL,
       name VARCHAR(255) NOT NULL,
+      project_name VARCHAR(255),
+      project_type VARCHAR(50),
+      description TEXT,
       api_key VARCHAR(64) NOT NULL,
       paymaster_address VARCHAR(42),
       balance_wei BIGINT DEFAULT 0,
@@ -243,6 +267,14 @@ export async function initDatabase(): Promise<void> {
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
+
+await pool.query(`
+  ALTER TABLE dapps ADD COLUMN IF NOT EXISTS project_name VARCHAR(255)
+`).catch(() => {});
+
+await pool.query(`ALTER TABLE dapps ADD COLUMN IF NOT EXISTS project_type VARCHAR(50)`).catch(() => {});
+
+await pool.query(`ALTER TABLE dapps ADD COLUMN IF NOT EXISTS description TEXT`).catch(() => {});
   
   await pool.query(`
     CREATE TABLE IF NOT EXISTS transactions (
