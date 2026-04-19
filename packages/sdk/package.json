@@ -1,5 +1,9 @@
 {
-  "name": "@conflux-paymaster/sdk",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "name": "conflux-paymaster-sdk",
   "version": "1.0.0",
   "description": "Gasless transactions SDK for Conflux eSpace",
   "main": "./dist/index.js",
