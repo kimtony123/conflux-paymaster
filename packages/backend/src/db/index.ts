@@ -140,6 +140,66 @@ export async function getDappUsage(
   };
 }
 
+export interface DailyUsage {
+  date: string;
+  transactions: number;
+  gas_used: bigint;
+  cost_wei: bigint;
+}
+
+export async function getDailyUsage(
+  dappId: string,
+  days: number = 7
+): Promise<DailyUsage[]> {
+  if (!pool) return [];
+  
+  const result = await pool.query(
+    `SELECT 
+       DATE(created_at) as date,
+       COUNT(*) as transactions,
+       COALESCE(SUM(gas_used), 0) as gas_used,
+       COALESCE(SUM(gas_cost_wei), 0) as cost_wei
+     FROM transactions 
+     WHERE dapp_id = $1 
+       AND created_at >= NOW() - INTERVAL '${days} days'
+     GROUP BY DATE(created_at)
+     ORDER BY date ASC`,
+    [dappId]
+  );
+  
+  return result.rows.map(row => ({
+    date: row.date.toISOString().split('T')[0],
+    transactions: parseInt(row.transactions),
+    gas_used: BigInt(row.gas_used),
+    cost_wei: BigInt(row.cost_wei)
+  }));
+}
+
+export async function getDepositsByPeriod(
+  dappId: string,
+  days: number = 30
+): Promise<{ date: string; amount_wei: bigint }[]> {
+  if (!pool) return [];
+  
+  const result = await pool.query(
+    `SELECT 
+       DATE(created_at) as date,
+       SUM(amount_wei) as amount_wei
+     FROM deposits 
+     WHERE dapp_id = $1 
+       AND status = 'confirmed'
+       AND created_at >= NOW() - INTERVAL '${days} days'
+     GROUP BY DATE(created_at)
+     ORDER BY date ASC`,
+    [dappId]
+  );
+  
+  return result.rows.map(row => ({
+    date: row.date.toISOString().split('T')[0],
+    amount_wei: BigInt(row.amount_wei || 0)
+  }));
+}
+
 export async function findDepositByTxHash(txHash: string): Promise<Deposit | null> {
   if (!pool) return null;
   const result = await pool.query("SELECT * FROM deposits WHERE tx_hash = $1", [txHash]);

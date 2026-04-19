@@ -86,6 +86,63 @@ router.get("/me/usage", async (req: Request, res: Response) => {
   }
 });
 
+router.get("/me/charts", async (req: Request, res: Response) => {
+  try {
+    const dapp = req.dapp!;
+    const period = parseInt(req.query.days as string) || 7;
+
+    const [dailyUsage, deposits, totals] = await Promise.all([
+      db.getDailyUsage(dapp.id, period),
+      db.getDepositsByPeriod(dapp.id, period),
+      db.getDappUsage(dapp.id)
+    ]);
+
+    const spendByPeriod = deposits.reduce((acc, dep) => {
+      const existing = acc.find(x => x.date === dep.date);
+      if (existing) {
+        existing.cost_wei += dep.amount_wei;
+      } else {
+        acc.push({ date: dep.date, cost_wei: dep.amount_wei, transactions: 0 });
+      }
+      return acc;
+    }, [] as { date: string; cost_wei: bigint; transactions: number }[]);
+
+    const mergedDaily = dailyUsage.map(day => {
+      const dep = spendByPeriod.find(d => d.date === day.date);
+      return {
+        date: day.date,
+        transactions: day.transactions,
+        gas_cost_eth: ethers.formatEther(day.cost_wei),
+        deposit_cost_eth: dep ? ethers.formatEther(dep.cost_wei) : "0"
+      };
+    });
+
+    const gasSpent = totals.total_cost_wei;
+    const depositSpent = deposits.reduce((sum, d) => sum + d.amount_wei, 0n);
+    const totalSpent = gasSpent + depositSpent;
+
+    const spendingByCategory = {
+      gas_fees: totalSpent > 0n ? Number((gasSpent * 10000n) / totalSpent) / 100 : 0,
+      deposits: totalSpent > 0n ? Number((depositSpent * 10000n) / totalSpent) / 100 : 0
+    };
+
+    res.json({
+      daily: mergedDaily,
+      spending_by_category: spendingByCategory,
+      totals: {
+        transactions: totals.total_transactions,
+        gas_spent_eth: ethers.formatEther(gasSpent),
+        deposit_spent_eth: ethers.formatEther(depositSpent),
+        total_spent_eth: ethers.formatEther(totalSpent)
+      },
+      period_days: period
+    });
+  } catch (error: any) {
+    console.error("[Dapps] Charts error:", error);
+    res.status(500).json({ error: "Failed to get charts data" });
+  }
+});
+
 router.get("/me/deposits", async (req: Request, res: Response) => {
   try {
     const dapp = req.dapp!;
