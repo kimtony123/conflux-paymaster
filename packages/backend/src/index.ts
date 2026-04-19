@@ -6,6 +6,10 @@ import rateLimit from "express-rate-limit";
 import { ethers } from "ethers";
 import { z } from "zod";
 import * as dotenv from "dotenv";
+import * as db from "./db/index.js";
+import authRoutes from "./routes/auth.js";
+import dappRoutes from "./routes/dapps.js";
+import depositRoutes from "./routes/deposits.js";
 
 dotenv.config();
 
@@ -14,6 +18,7 @@ const PORT = process.env.PORT || 3001;
 
 const PAYMASTER_ADDRESS = process.env.PAYMASTER_ADDRESS || "";
 const SIGNER_PRIVATE_KEY = process.env.SIGNER_PRIVATE_KEY || "";
+const RELAYER_PRIVATE_KEY = process.env.RELAYER_PRIVATE_KEY || process.env.SIGNER_PRIVATE_KEY || "";
 const CONFLUX_RPC_URL = process.env.CONFLUX_RPC_URL || "https://evmtestnet.confluxrpc.com";
 const CHAIN_ID = parseInt(process.env.CHAIN_ID || "71");
 const ENTRY_POINT_ADDRESS = process.env.ENTRY_POINT_ADDRESS || "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
@@ -42,11 +47,24 @@ const signRequestSchema = z.object({
   userAddress: z.string(),
 });
 
+interface VerifierInfo {
+  address: string;
+  name: string;
+  dailyLimit: number;
+  createdAt: number;
+}
+
+const verifierRegistry = new Map<string, VerifierInfo>();
+
 let provider: ethers.JsonRpcProvider;
 let signer: ethers.Wallet;
+let relayerWallet: ethers.Wallet;
 let paymaster: ethers.Contract;
+let entryPoint: ethers.Contract;
 
-function init() {
+async function init() {
+  await db.initDatabase();
+
   if (!PAYMASTER_ADDRESS || !SIGNER_PRIVATE_KEY) {
     console.error("Missing required environment variables:");
     console.error("  PAYMASTER_ADDRESS:", !!PAYMASTER_ADDRESS);
@@ -56,17 +74,31 @@ function init() {
 
   provider = new ethers.JsonRpcProvider(CONFLUX_RPC_URL);
   signer = new ethers.Wallet(SIGNER_PRIVATE_KEY, provider);
+  relayerWallet = new ethers.Wallet(RELAYER_PRIVATE_KEY, provider);
   
   const paymasterABI = [
     "function getHash((address,uint256,bytes,bytes,uint256,uint256,uint256,uint256,uint256,bytes) userOp, uint48 validUntil, uint48 validAfter) view returns (bytes32)",
     "function validatePaymasterUserOp((address,uint256,bytes,bytes,uint256,uint256,uint256,uint256,uint256,bytes,bytes) userOp, bytes32 userOpHash, uint256 missingAccountFunds) returns (bytes memory context, uint256 validationData)",
   ];
   
-  paymaster = new ethers.Contract(PAYMASTER_ADDRESS, paymasterABI, provider);
+  const entryPointABI = [
+    "function handleOps((address,uint256,bytes,bytes,uint256,uint256,uint256,uint256,uint256,bytes,bytes)[],address) returns ()",
+    "function getNonce(address sender, uint192 key) view returns (uint256)",
+  ];
   
-  console.log("Backend signing service initialized:");
+  paymaster = new ethers.Contract(PAYMASTER_ADDRESS, paymasterABI, provider);
+  entryPoint = new ethers.Contract(ENTRY_POINT_ADDRESS, entryPointABI, provider);
+  
+  console.log("=== CONFLUX PAYMASTER SERVICES ===");
+  console.log("\n[SERVICE A] Signing Service:");
   console.log("  Paymaster:", PAYMASTER_ADDRESS);
   console.log("  Signer:", signer.address);
+  
+  console.log("\n[SERVICE B] Relayer Service:");
+  console.log("  Relayer Wallet:", relayerWallet.address);
+  console.log("  EntryPoint:", ENTRY_POINT_ADDRESS);
+  
+  console.log("\n[Network]");
   console.log("  Chain ID:", CHAIN_ID);
   console.log("  RPC:", CONFLUX_RPC_URL);
 }
@@ -161,6 +193,7 @@ app.post("/api/paymaster/sign", async (req: Request, res: Response) => {
     }
 
     const { userOperation, userAddress } = validation.data;
+    const apiKey = req.headers["x-api-key"] as string;
 
     const rateLimit = checkRateLimit(req);
     if (!rateLimit.allowed) {
@@ -194,6 +227,26 @@ app.post("/api/paymaster/sign", async (req: Request, res: Response) => {
       [PAYMASTER_ADDRESS, signature]
     );
 
+    if (apiKey) {
+      try {
+        const dapp = await db.findDappByApiKey(apiKey);
+        if (dapp) {
+          const gasEstimate = (
+            BigInt(userOperation.callGasLimit) +
+            BigInt(userOperation.verificationGasLimit) +
+            BigInt(userOperation.preVerificationGas)
+          );
+          const gasPrice = BigInt(userOperation.maxFeePerGas);
+          const costWei = gasEstimate * gasPrice;
+          
+          await db.recordTransaction(dapp.id, userAddress, gasEstimate, costWei, userOpHash);
+          console.log(`[Usage] dApp ${dapp.name}: ${costWei} wei tracked`);
+        }
+      } catch (dbError) {
+        console.error("[Usage] Failed to log:", dbError);
+      }
+    }
+
     res.json({
       paymasterAndData,
       validUntil,
@@ -221,13 +274,156 @@ app.get("/api/paymaster/status/:address", (req: Request, res: Response) => {
   });
 });
 
+const relayRequestSchema = z.object({
+  userOperation: userOpSchema,
+  userAddress: z.string(),
+});
+
+app.post("/api/v1/relay", async (req: Request, res: Response) => {
+  try {
+    const validation = relayRequestSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({ error: "Invalid request", details: validation.error.issues });
+    }
+
+    const { userOperation, userAddress } = validation.data;
+
+    console.log(`[Relayer] Received UserOp from ${userAddress}`);
+
+    const userOpPacked = [
+      userOperation.sender,
+      userOperation.nonce,
+      userOperation.initCode || "0x",
+      userOperation.callData || "0x",
+      userOperation.callGasLimit,
+      userOperation.verificationGasLimit,
+      userOperation.preVerificationGas,
+      userOperation.maxFeePerGas,
+      userOperation.maxPriorityFeePerGas,
+      userOperation.paymasterAndData || "0x",
+      userOperation.signature,
+    ];
+
+    const relayerBalance = await provider.getBalance(relayerWallet.address);
+    if (relayerBalance < ethers.parseEther("0.01")) {
+      console.error("[Relayer] Insufficient CFX!");
+      return res.status(503).json({ error: "Relayer has insufficient CFX" });
+    }
+
+    console.log(`[Relayer] Balance: ${ethers.formatEther(relayerBalance)} CFX`);
+    console.log(`[Relayer] Submitting to EntryPoint...`);
+
+    const EntryPointIface = new ethers.Interface([
+      "function handleOps((address,uint256,bytes,bytes,uint256,uint256,uint256,uint256,uint256,bytes,bytes)[],address)",
+    ]);
+
+    const tx = await relayerWallet.sendTransaction({
+      to: ENTRY_POINT_ADDRESS,
+      data: EntryPointIface.encodeFunctionData("handleOps", [[userOpPacked], relayerWallet.address]),
+      gasLimit: 500000,
+    });
+
+    console.log(`[Relayer] TX sent: ${tx.hash}`);
+    const receipt = await tx.wait();
+
+    console.log(`[Relayer] Confirmed! Block: ${receipt?.blockNumber}, Gas: ${receipt?.gasUsed}`);
+
+    res.json({
+      success: true,
+      userOpHash: getUserOpHash(userOperation),
+      transactionHash: tx.hash,
+      blockNumber: receipt?.blockNumber ? Number(receipt.blockNumber) : 0,
+      gasUsed: receipt?.gasUsed ? Number(receipt.gasUsed) : 0,
+      relayer: relayerWallet.address,
+    });
+  } catch (error: any) {
+    console.error("[Relayer] Error:", error.message || error);
+    res.status(500).json({ error: "Failed to relay UserOperation", details: error.message });
+  }
+});
+
+app.get("/api/v1/relayer/status", async (req: Request, res: Response) => {
+  try {
+    const balance = await provider.getBalance(relayerWallet.address);
+    res.json({
+      relayer: relayerWallet.address,
+      balance: ethers.formatEther(balance),
+      balanceWei: balance.toString(),
+      entryPoint: ENTRY_POINT_ADDRESS,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to get relayer status" });
+  }
+});
+
+const registerVerifierSchema = z.object({
+  verifierAddress: z.string().startsWith("0x"),
+  name: z.string().min(1).max(100),
+  dailyLimit: z.number().int().positive().max(10000).default(100),
+});
+
+app.post("/api/v1/verifiers/register", async (req: Request, res: Response) => {
+  try {
+    const validation = registerVerifierSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({ error: "Invalid request", details: validation.error.issues });
+    }
+
+    const { verifierAddress, name, dailyLimit } = validation.data;
+
+    if (verifierRegistry.has(verifierAddress)) {
+      return res.status(409).json({ error: "Verifier already registered" });
+    }
+
+    verifierRegistry.set(verifierAddress, {
+      address: verifierAddress,
+      name,
+      dailyLimit,
+      createdAt: Date.now(),
+    });
+
+    console.log(`[Signing] Registered new verifier: ${name} (${verifierAddress})`);
+
+    res.json({
+      success: true,
+      verifier: verifierAddress,
+      name,
+      dailyLimit,
+    });
+  } catch (error: any) {
+    console.error("[Signing] Register error:", error);
+    res.status(500).json({ error: "Failed to register verifier" });
+  }
+});
+
+app.get("/api/v1/verifiers", (req: Request, res: Response) => {
+  const verifiers = Array.from(verifierRegistry.values()).map(v => ({
+    address: v.address,
+    name: v.name,
+    dailyLimit: v.dailyLimit,
+  }));
+  res.json({ verifiers, count: verifiers.length });
+});
+
+app.get("/api/v1/verifiers/:address", (req: Request, res: Response) => {
+  const verifier = verifierRegistry.get(req.params.address);
+  if (!verifier) {
+    return res.status(404).json({ error: "Verifier not found" });
+  }
+  res.json(verifier);
+});
+
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error("Unhandled error:", err);
   res.status(500).json({ error: "Internal server error" });
 });
 
-app.listen(PORT, () => {
-  init();
+app.use("/api/v1/auth", authRoutes);
+app.use("/api/v1/dapps", dappRoutes);
+app.use("/api/v1/deposits", depositRoutes);
+
+app.listen(PORT, async () => {
+  await init();
   console.log(`\n🚀 Conflux Paymaster Signing Service`);
   console.log(`   Listening on http://localhost:${PORT}`);
   console.log(`   Rate limit: ${DAILY_TX_LIMIT} transactions/day\n`);

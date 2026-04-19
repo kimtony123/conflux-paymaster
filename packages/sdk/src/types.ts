@@ -5,6 +5,8 @@ export interface PaymasterConfig {
   chainId: 71 | 1030;
   bundlerUrl?: string;
   entryPointAddress?: string;
+  /** API key for tracking usage to your dApp (from dashboard) */
+  apiKey?: string;
 }
 
 export interface SponsoredTransaction {

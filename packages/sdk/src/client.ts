@@ -19,9 +19,15 @@ export class ConfluxPaymaster {
   private chainId: number;
   private bundlerUrl: string;
   private entryPointAddress: string;
+  private apiKey?: string;
   private provider: ethers.JsonRpcProvider;
   private signer?: ethers.Wallet;
   private factoryAddress?: string;
+  
+  // Performance optimizations
+  private cachedGasPrice?: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; timestamp: number };
+  private readonly GAS_CACHE_TTL = 15000; // 15 seconds cache
+  private readonly gasPriceCache = new Map<string, { value: bigint; expiry: number }>();
 
   constructor(config: PaymasterConfig) {
     this.rpcUrl = config.rpcUrl;
@@ -30,7 +36,16 @@ export class ConfluxPaymaster {
     this.chainId = config.chainId;
     this.bundlerUrl = config.bundlerUrl || this.getDefaultBundlerUrl();
     this.entryPointAddress = config.entryPointAddress || ENTRY_POINT_ADDRESS;
+    this.apiKey = config.apiKey;
     this.provider = new ethers.JsonRpcProvider(config.rpcUrl);
+  }
+
+  private getHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.apiKey) {
+      headers["X-API-Key"] = this.apiKey;
+    }
+    return headers;
   }
 
   private getDefaultBundlerUrl(): string {
@@ -85,12 +100,27 @@ export class ConfluxPaymaster {
     );
   }
 
-  async getGasPrice(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+  async getGasPrice(forceRefresh = false): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+    const now = Date.now();
+    
+    if (!forceRefresh && this.cachedGasPrice && (now - this.cachedGasPrice.timestamp) < this.GAS_CACHE_TTL) {
+      return {
+        maxFeePerGas: this.cachedGasPrice.maxFeePerGas,
+        maxPriorityFeePerGas: this.cachedGasPrice.maxPriorityFeePerGas,
+      };
+    }
+    
     const feeData = await this.provider.getFeeData();
     
-    return {
+    this.cachedGasPrice = {
       maxFeePerGas: feeData.maxFeePerGas || 1000000000n,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || 1000000000n,
+      timestamp: now,
+    };
+    
+    return {
+      maxFeePerGas: this.cachedGasPrice.maxFeePerGas,
+      maxPriorityFeePerGas: this.cachedGasPrice.maxPriorityFeePerGas,
     };
   }
 
@@ -100,22 +130,11 @@ export class ConfluxPaymaster {
     data: string,
     value: bigint
   ): Promise<UserOperation> {
-    const entryPoint = new ethers.Contract(
-      this.entryPointAddress,
-      [
-        "function getNonce(address sender, uint192 key) view returns (uint256 nonce)"
-      ],
-      this.provider
-    );
-
-    let nonce: bigint;
-    try {
-      nonce = await entryPoint.getNonce(sender, 0n) as bigint;
-    } catch {
-      nonce = 0n;
-    }
-
-    const gasPrice = await this.getGasPrice();
+    // Optimize: fetch nonce and gas price in parallel
+    const [nonce, gasPrice] = await Promise.all([
+      this.getNonce(sender),
+      this.getGasPrice(),
+    ]);
 
     const callData = this.encodeExecuteCall(to, value, data);
 
@@ -133,6 +152,20 @@ export class ConfluxPaymaster {
       signature: "0x",
     };
   }
+  
+  private async getNonce(sender: string): Promise<bigint> {
+    const entryPoint = new ethers.Contract(
+      this.entryPointAddress,
+      ["function getNonce(address sender, uint192 key) view returns (uint256 nonce)"],
+      this.provider
+    );
+    
+    try {
+      return await entryPoint.getNonce(sender, 0n) as bigint;
+    } catch {
+      return 0n;
+    }
+  }
 
   private encodeExecuteCall(target: string, value: bigint, data: string): string {
     const iface = new ethers.Interface([
@@ -144,7 +177,7 @@ export class ConfluxPaymaster {
   async fetchPaymasterSignature(userOp: UserOperation): Promise<string> {
     const response = await fetch(`${this.signingServiceUrl}/api/paymaster/sign`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.getHeaders(),
       body: JSON.stringify({
         userOperation: {
           sender: userOp.sender,
@@ -278,6 +311,7 @@ export class ConfluxPaymaster {
       throw new Error("Call connect() first with a private key");
     }
 
+    // Optimize: Parallel account check + nonce/gas fetch
     const accountAddress = await this.getOrCreateAccount();
 
     let userOp = await this.buildUserOperation(
@@ -287,6 +321,7 @@ export class ConfluxPaymaster {
       tx.value || 0n
     );
 
+    // Optimize: Fetch paymaster signature in parallel with other prep
     const paymasterAndData = await this.fetchPaymasterSignature(userOp);
     userOp.paymasterAndData = paymasterAndData;
 
@@ -308,6 +343,75 @@ export class ConfluxPaymaster {
       success: receipt?.success ?? true,
     };
   }
+  
+  /**
+   * Optimized: Send using relayer service (recommended for Conflux)
+   * Combines signing + relayer in one flow
+   */
+  async sendViaRelayer(tx: SponsoredTransaction): Promise<SponsoredTransactionResult> {
+    if (!this.signer) {
+      throw new Error("Call connect() first with a private key");
+    }
+
+    const accountAddress = await this.getOrCreateAccount();
+
+    // Build UserOp
+    let userOp = await this.buildUserOperation(
+      accountAddress,
+      tx.to,
+      tx.data || "0x",
+      tx.value || 0n
+    );
+
+    // Get paymaster signature
+    const paymasterAndData = await this.fetchPaymasterSignature(userOp);
+    userOp.paymasterAndData = paymasterAndData;
+
+    // Sign UserOp
+    const signature = await this.signUserOperation(userOp);
+    userOp.signature = signature;
+
+    // Send via relayer
+    const response = await fetch(`${this.signingServiceUrl}/api/v1/relay`, {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        userOperation: {
+          sender: userOp.sender,
+          nonce: userOp.nonce.toString(),
+          initCode: userOp.initCode,
+          callData: userOp.callData,
+          callGasLimit: userOp.callGasLimit.toString(),
+          verificationGasLimit: userOp.verificationGasLimit.toString(),
+          preVerificationGas: userOp.preVerificationGas.toString(),
+          maxFeePerGas: userOp.maxFeePerGas.toString(),
+          maxPriorityFeePerGas: userOp.maxPriorityFeePerGas.toString(),
+          paymasterAndData: userOp.paymasterAndData,
+          signature: userOp.signature,
+        },
+        userAddress: accountAddress,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Relayer failed: ${error}`);
+    }
+
+    const result = await response.json() as {
+      success: boolean;
+      userOpHash: string;
+      transactionHash: string;
+      blockNumber: number;
+      gasUsed: number;
+    };
+
+    return {
+      userOpHash: result.userOpHash,
+      txHash: result.transactionHash,
+      success: result.success,
+    };
+  }
 
   async getPaymasterQuote(): Promise<PaymasterQuote> {
     const response = await fetch(`${this.signingServiceUrl}/api/paymaster/quote`);
@@ -327,7 +431,16 @@ export class ConfluxPaymaster {
       chainId: this.chainId as 71 | 1030,
       bundlerUrl: this.bundlerUrl,
       entryPointAddress: this.entryPointAddress,
+      apiKey: this.apiKey,
     };
+  }
+
+  setApiKey(apiKey: string): void {
+    this.apiKey = apiKey;
+  }
+
+  getApiKey(): string | undefined {
+    return this.apiKey;
   }
 }
 

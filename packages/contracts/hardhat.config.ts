@@ -15,7 +15,7 @@ const CONFLUXSCAN_API_KEY = process.env.CONFLUXSCAN_API_KEY || "";
 
 const config: HardhatUserConfig = {
   solidity: {
-    version: "0.8.24",
+    version: "0.8.28",
     settings: {
       optimizer: {
         enabled: true,

@@ -1,5 +1,9 @@
 # Conflux Paymaster SDK
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/conflux-paymaster/conflux-paymaster/main/packages/sdk/examples/nextjs/public/logo.jpg" alt="Conflux Paymaster SDK Logo" width="200"/>
+</p>
+
 > Gasless Transactions for Conflux eSpace. Build dApps that anyone can use.
 
 **Status**: Implementation Complete - Ready for Deployment
@@ -66,50 +70,52 @@ The Conflux Paymaster SDK provides a **complete, production-ready abstraction la
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                          DEVELOPER'S dApp (e.g., AxPesa)                 │
+│                          DEVELOPER'S dApp                               │
 │                                                                          │
 │   import { ConfluxPaymaster } from '@conflux-paymaster/sdk';            │
-│   await paymaster.sendTransaction({ to: tokenAddress, data: ... });     │
-└───────────────────────────────────┬─────────────────────────────────────┘
+│   await paymaster.sendTransaction({ to: tokenAddress, data: ... });         │
+└───────────────────────────────────────────────────────────────────┬─────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     CONFLUX PAYMASTER SDK (Client)                       │
+│              CONFLUX PAYMASTER SDK (Client)                       │
 │                                                                          │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  │
-│  │ Smart Account   │  │ UserOp Builder  │  │   Bundler Client        │  │
+│  │ Smart Account   │  │ UserOp Builder  │  │   Relayer Client        │  │
 │  │   Manager       │  │   & Signer      │  │   (eth_sendUserOp)      │  │
 │  └─────────────────┘  └─────────────────┘  └─────────────────────────┘  │
-└───────────────────────────────────┬─────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────────┬─────────────────────────────────────┘
                                     │
               ┌─────────────────────┴─────────────────────┐
               ▼                                           ▼
 ┌─────────────────────────────┐           ┌─────────────────────────────┐
-│   PAYMASTER BACKEND (API)   │           │      BUNDLER (e.g., Alto)    │
+│   SIGNING SERVICE (API)     │           │      RELAYER SERVICE        │
 │                             │           │                             │
-│  Signs paymasterAndData     │           │  Submits UserOps to          │
-│  after validation & rate    │           │  Conflux eSpace EntryPoint   │
-│  limiting.                  │           │                             │
+│  - Signs paymasterAndData    │           │  - Has wallet with CFX       │
+│  - Rate limiting            │           │  - Submits to EntryPoint     │
+│  - Verifier registry       │           │  - Gets reimbursed         │
 └─────────────────────────────┘           └──────────────┬──────────────┘
-                                                         │
-                                                         ▼
-                                          ┌─────────────────────────────┐
-                                          │    CONFLUX eSPACE NETWORK    │
-                                          │                             │
-                                          │  EntryPoint → Paymaster →    │
-                                          │  Smart Account → Target      │
-                                          └─────────────────────────────┘
+                                                          │
+                                                          ▼
+                                           ┌─────────────────────────────┐
+                                           │    CONFLUX eSPACE NETWORK    │
+                                           │                             │
+                                           │  EntryPoint → Paymaster →   │
+                                           │  Smart Account → Target    │
+                                           └─────────────────────────────┘
 ```
 
-### Transaction Flow (Gasless)
+### Multi-Tenant Gas sponsorship Flow
 
-1.  dApp calls `paymaster.sendTransaction()`.
-2.  SDK builds a `UserOperation` for the user's smart account.
-3.  SDK sends the `UserOperation` to the **Paymaster Backend** for approval.
-4.  Backend validates the request and returns a signature authorizing gas sponsorship.
-5.  SDK submits the signed `UserOperation` to the **Bundler**.
-6.  Bundler includes it in a batch and sends it to the **EntryPoint** contract on Conflux eSpace.
-7.  The **Paymaster contract** pays the CFX gas fee. The user's transaction executes.
+1.  **dApp calls** `paymaster.sendTransaction()`
+2.  **SDK builds** a `UserOperation` for user's smart account
+3.  **Signing Service** receives, validates, signs paymaster signature
+4.  **Relayer Service** receives fully-signed UserOp
+5.  **Relayer wallet** (has CFX) submits to EntryPoint
+6.  **EntryPoint** executes - charges paymaster deposit
+7.  **Paymaster** reimburses relayer from its deposit
+
+**KEY PROOF:** On April 19, 2026, the sender's CFX balance was **unchanged** (0.20302872... → 0.20302872...) after a successful gasless USDT transfer!
 
 ---
 
