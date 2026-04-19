@@ -4,14 +4,26 @@ import { ConfluxPaymaster } from "@conflux-paymaster/sdk";
 
 dotenv.config({ path: "../../../.env" });
 
+const timings: { step: string; ms: number }[] = [];
+const startTime = Date.now();
+
+function logTime(step: string) {
+  const now = Date.now();
+  return () => {
+    const ms = Date.now() - now;
+    timings.push({ step, ms });
+    console.log(`   ⏱️ ${step}: ${ms}ms`);
+  };
+}
+
 const TEST_CONFIG = {
   rpcUrl: "https://evmtestnet.confluxrpc.com",
   chainId: 71,
   paymasterAddress: "0x0cDE16Cf1fD5Bf2536069Aec8a2eF0832A27577B",
   factoryAddress: "0x3d536eA50c323fFA2bc6b7DF0c1AE253f6144eAE", // FactoryV07
-  // Use Render backend - change to your URL
-  signingServiceUrl: process.env.BACKEND_URL || "https://conflux-paymaster-x.onrender.com",
-  relayerServiceUrl: process.env.BACKEND_URL || "https://conflux-paymaster-x.onrender.com",
+  // Use local backend by default
+  signingServiceUrl: process.env.BACKEND_URL || "http://localhost:3001",
+  relayerServiceUrl: process.env.BACKEND_URL || "http://localhost:3001",
   bundlerUrl: "https://api.stackup.sh/v1/bundler/public",
   entryPointAddress: "0xcd3072F98c8f1Caef717dcA1f3A85d9Dc555ae8C",
   usdtTokenAddress: "0x4d1beB67e8f0102d5c983c26FDf0b7C6FFF37a0c",
@@ -20,7 +32,7 @@ const TEST_CONFIG = {
   amountToTransfer: ethers.parseUnits("0.000001", 6), // Transfer 0.000001 USDT to show it works
   useRelayer: true,
   // API key for dApp tracking (get from dashboard after login)
-  apiKey: process.env.API_KEY || "",
+  apiKey: process.env.API_KEY || "cfpm_sk_821c3f6115974a0baef8a577b9e2ea30",
 };
 
 const USDT_ABI = [
@@ -40,7 +52,7 @@ async function main() {
   console.log("\n[1] Sender Wallet");
   console.log("   Address:", senderWallet.address);
   const senderUsdtBalance = await getUsdtBalance(senderWallet.address, provider);
-  console.log("   USDT Balance:", ethers.formatUnits(senderUsdtBalance, 18), "USDT");
+  console.log("   USDT Balance:", ethers.formatUnits(senderUsdtBalance, 6), "USDT");
   const senderCfxBalance = await provider.getBalance(senderWallet.address);
   console.log("   CFX Balance:", ethers.formatEther(senderCfxBalance), "CFX (should be 0)");
 
@@ -86,7 +98,8 @@ async function main() {
     console.log("   ✅ Smart account already deployed");
   }
 
-  console.log("\n[3] Build UserOperation");
+console.log("\n[3] Build UserOperation");
+  const timer3 = logTime("Build UserOp");
   const entryPointIface = new ethers.Interface(["function getNonce(address sender, uint192 key) view returns (uint256)"]);
   const entryPointCalldata = entryPointIface.encodeFunctionData("getNonce", [smartAccountAddress, 0n]);
   const entryPointResult = await provider.call({
@@ -105,7 +118,6 @@ async function main() {
 
   const feeData = await provider.getFeeData();
 
-  // Build UserOp in EntryPoint v0.7 non-packed format
   const userOp = {
     sender: smartAccountAddress,
     nonce: nonce,
@@ -119,22 +131,28 @@ async function main() {
     paymasterAndData: "0x",
     signature: "0x",
   };
+  timer3();
   console.log("   UserOp created:", userOp.sender);
 
   console.log("\n[4] Get Paymaster Signature");
+  const timer4 = logTime("Paymaster Sign");
   const paymasterSig = await fetchPaymasterSignature(userOp, TEST_CONFIG.signingServiceUrl, TEST_CONFIG.apiKey);
   userOp.paymasterAndData = paymasterSig;
+  timer4();
   console.log("   ✅ Paymaster signature received");
 
   console.log("\n[5] Sign UserOperation");
-  // EntryPoint already includes chainId in userOpHash, so sign directly
+  const timer5 = logTime("User Sign");
   const userOpHashVal = getUserOpHash(userOp, TEST_CONFIG.entryPointAddress, TEST_CONFIG.chainId);
   const userSignature = await senderWallet.signMessage(ethers.getBytes(userOpHashVal));
   userOp.signature = userSignature;
+  timer5();
   console.log("   ✅ UserOperation signed");
 
   console.log("\n[6] Send UserOperation to Relayer");
   console.log("   Relayer:", TEST_CONFIG.relayerServiceUrl);
+  const timer6 = logTime("Relayer Submit");
+  const timer6Confirm = logTime("Confirm TX");
 
   const userOpForRelay = {
     userOperation: {
@@ -161,6 +179,7 @@ async function main() {
     if (TEST_CONFIG.useRelayer) {
       // Use our relayer service
       console.log("   Using our relayer service...");
+      const relayStart = Date.now();
       const response = await fetch(`${TEST_CONFIG.relayerServiceUrl}/api/v1/relay`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -175,13 +194,12 @@ async function main() {
       const result = await response.json() as {
         success: boolean;
         transactionHash: string;
-        blockNumber: number;
-        gasUsed: number;
+        status: string;
       };
+      timer6();
       txHash = result.transactionHash;
-      blockNumber = BigInt(result.blockNumber);
-      gasUsed = BigInt(result.gasUsed);
       console.log("   ✅ Relayed via service! TX:", txHash);
+      console.log("   ✅ Transaction submitted (not waiting for confirmation)");
     } else {
       // Direct send (old way - sender pays gas)
       const EntryPointIface = new ethers.Interface([
@@ -225,7 +243,16 @@ async function main() {
     console.log("\n[7] Verify on ConfluxScan");
     console.log("   🔍 https://evmtestnet.confluxscan.io/tx/" + txHash);
 
+    const total = Date.now() - startTime;
     console.log("\n" + "=".repeat(60));
+    console.log("TIMING SUMMARY");
+    console.log("=".repeat(60));
+    timings.forEach(t => {
+      const pct = ((t.ms / total) * 100).toFixed(1);
+      console.log(`   ${t.step}: ${t.ms}ms (${pct}%)`);
+    });
+    console.log(`   TOTAL: ${total}ms`);
+    console.log("=".repeat(60));
     console.log("E2E Test Complete!");
     console.log("=".repeat(60));
   } catch (err: any) {

@@ -26,6 +26,8 @@ const ENTRY_POINT_ADDRESS = process.env.ENTRY_POINT_ADDRESS || "0x5FF137D4b0FDCD
 const DAILY_TX_LIMIT = parseInt(process.env.DAILY_TX_LIMIT || "100");
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+console.log("🔧 Starting with RPC:", CONFLUX_RPC_URL, "Chain:", CHAIN_ID);
+
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 
 const userOpSchema = z.object({
@@ -228,9 +230,14 @@ app.post("/api/paymaster/sign", async (req: Request, res: Response) => {
     );
 
     if (apiKey) {
+      let freeTierInfo = null;
       try {
         const dapp = await db.findDappByApiKey(apiKey);
         if (dapp) {
+          const dappBalance = BigInt(dapp.balance_wei || 0);
+          const freeTierCheck = await db.checkAndUseFreeTier(dapp.id);
+          freeTierInfo = freeTierCheck;
+          
           const gasEstimate = (
             BigInt(userOperation.callGasLimit) +
             BigInt(userOperation.verificationGasLimit) +
@@ -240,7 +247,24 @@ app.post("/api/paymaster/sign", async (req: Request, res: Response) => {
           const costWei = gasEstimate * gasPrice;
           
           await db.recordTransaction(dapp.id, userAddress, gasEstimate, costWei, userOpHash);
-          console.log(`[Usage] dApp ${dapp.name}: ${costWei} wei tracked`);
+          
+          if (freeTierCheck.isFree) {
+            await db.incrementFreeTierUsage(dapp.id);
+            const used = (freeTierCheck.remaining - 1) >= 0 ? (freeTierCheck.remaining - 1) : 0;
+            console.log(`[FreeTier] dApp ${dapp.name}: used ${used} of 10 free requests`);
+          } else if (dappBalance >= costWei) {
+            await db.updateDappBalance(dapp.id, -costWei);
+            console.log(`[Usage] dApp ${dapp.name}: ${costWei} wei deducted from balance`);
+          } else {
+            return res.status(403).json({ 
+              error: "Insufficient balance",
+              message: "Your free tier is exhausted and you have insufficient balance. Please add funds to continue.",
+              remaining: 0,
+              upgradeUrl: "/add-funds",
+              required: costWei.toString(),
+              available: dappBalance.toString()
+            });
+          }
         }
       } catch (dbError) {
         console.error("[Usage] Failed to log:", dbError);
@@ -304,38 +328,54 @@ app.post("/api/v1/relay", async (req: Request, res: Response) => {
       userOperation.signature,
     ];
 
+    const relayerBalanceStart = Date.now();
     const relayerBalance = await provider.getBalance(relayerWallet.address);
+    console.log(`[Relayer] getBalance took ${Date.now() - relayerBalanceStart}ms, balance: ${ethers.formatEther(relayerBalance)} CFX`);
+    
     if (relayerBalance < ethers.parseEther("0.01")) {
       console.error("[Relayer] Insufficient CFX!");
       return res.status(503).json({ error: "Relayer has insufficient CFX" });
     }
 
-    console.log(`[Relayer] Balance: ${ethers.formatEther(relayerBalance)} CFX`);
     console.log(`[Relayer] Submitting to EntryPoint...`);
 
     const EntryPointIface = new ethers.Interface([
       "function handleOps((address,uint256,bytes,bytes,uint256,uint256,uint256,uint256,uint256,bytes,bytes)[],address)",
     ]);
 
+    const txData = EntryPointIface.encodeFunctionData("handleOps", [[userOpPacked], relayerWallet.address]);
+    console.log(`[Relayer] Encoding done, sending tx...`);
+    
+    const sendStart = Date.now();
     const tx = await relayerWallet.sendTransaction({
       to: ENTRY_POINT_ADDRESS,
-      data: EntryPointIface.encodeFunctionData("handleOps", [[userOpPacked], relayerWallet.address]),
+      data: txData,
       gasLimit: 500000,
     });
+    const sendEnd = Date.now();
+    console.log(`[Relayer] sendTransaction took ${sendEnd - sendStart}ms`);
 
-    console.log(`[Relayer] TX sent: ${tx.hash}`);
-    const receipt = await tx.wait();
-
-    console.log(`[Relayer] Confirmed! Block: ${receipt?.blockNumber}, Gas: ${receipt?.gasUsed}`);
-
+    console.log(`[Relayer] Returning tx hash NOW: ${tx.hash} (not waiting for confirm)`);
+    // Return immediately - don't wait for confirmation
+    // Client can check status via transaction hash
     res.json({
       success: true,
       userOpHash: getUserOpHash(userOperation),
       transactionHash: tx.hash,
-      blockNumber: receipt?.blockNumber ? Number(receipt.blockNumber) : 0,
-      gasUsed: receipt?.gasUsed ? Number(receipt.gasUsed) : 0,
+      status: "submitted",
+      message: "Transaction submitted. Use transactionHash to check confirmation.",
       relayer: relayerWallet.address,
     });
+    console.log(`[Relayer] Response sent!`);
+
+    // Background: wait for confirmation and get gas used
+    tx.wait()
+      .then((receipt) => {
+        console.log(`[Relayer] Confirmed! Block: ${receipt?.blockNumber}, Gas: ${receipt?.gasUsed}`);
+      })
+      .catch((err) => {
+        console.error("[Relayer] Confirmation error:", err.message);
+      });
   } catch (error: any) {
     console.error("[Relayer] Error:", error.message || error);
     res.status(500).json({ error: "Failed to relay UserOperation", details: error.message });
@@ -426,7 +466,8 @@ app.listen(PORT, async () => {
   await init();
   console.log(`\n🚀 Conflux Paymaster Signing Service`);
   console.log(`   Listening on http://localhost:${PORT}`);
-  console.log(`   Rate limit: ${DAILY_TX_LIMIT} transactions/day\n`);
+  console.log(`   Free tier: 10 transactions per API key`);
+  console.log(`   Paid: Deductions from dApp balance\n`);
 });
 
 export default app;

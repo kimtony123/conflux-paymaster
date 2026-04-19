@@ -23,7 +23,9 @@ export interface Dapp {
   description: string;
   api_key: string;
   paymaster_address: string | null;
-  balance_wei: bigint;
+  balance_wei: string;
+  free_tier_requests: number;
+  free_tier_used: number;
   status: string;
   created_at: Date;
   updated_at: Date;
@@ -112,8 +114,38 @@ export async function getDappById(id: string): Promise<Dapp | null> {
 export async function updateDappBalance(dappId: string, amount: bigint): Promise<void> {
   if (!pool) return;
   await pool.query(
-    "UPDATE dapps SET balance_wei = balance_wei + $1, updated_at = NOW() WHERE id = $2",
-    [amount, dappId]
+    "UPDATE dapps SET balance_wei = balance_wei + $1::numeric, updated_at = NOW() WHERE id = $2",
+    [amount.toString(), dappId]
+  );
+}
+
+export async function checkAndUseFreeTier(dappId: string): Promise<{ allowed: boolean; remaining: number; isFree: boolean }> {
+  if (!pool) return { allowed: true, remaining: 10, isFree: false };
+  
+  const result = await pool.query(
+    "SELECT free_tier_requests, free_tier_used FROM dapps WHERE id = $1",
+    [dappId]
+  );
+  
+  if (result.rows.length === 0) {
+    return { allowed: true, remaining: 10, isFree: false };
+  }
+  
+  const { free_tier_requests, free_tier_used } = result.rows[0];
+  const remaining = (free_tier_requests || 10) - (free_tier_used || 0);
+  
+  if (remaining <= 0) {
+    return { allowed: false, remaining: 0, isFree: true };
+  }
+  
+  return { allowed: true, remaining, isFree: true };
+}
+
+export async function incrementFreeTierUsage(dappId: string): Promise<void> {
+  if (!pool) return;
+  await pool.query(
+    "UPDATE dapps SET free_tier_used = free_tier_used + 1, updated_at = NOW() WHERE id = $1",
+    [dappId]
   );
 }
 
@@ -236,9 +268,9 @@ export async function createDeposit(
   
   const result = await pool.query(
     `INSERT INTO deposits (dapp_id, amount_wei, tx_hash, status, created_at)
-     VALUES ($1, $2, $3, 'confirmed', NOW())
+     VALUES ($1, $2::numeric, $3, 'confirmed', NOW())
      RETURNING *`,
-    [dappId, amountWei, txHash]
+    [dappId, amountWei.toString(), txHash]
   );
   return result.rows[0];
 }
@@ -261,7 +293,9 @@ export async function initDatabase(): Promise<void> {
       description TEXT,
       api_key VARCHAR(64) NOT NULL,
       paymaster_address VARCHAR(42),
-      balance_wei BIGINT DEFAULT 0,
+      balance_wei NUMERIC DEFAULT 0,
+      free_tier_requests INTEGER DEFAULT 10,
+      free_tier_used INTEGER DEFAULT 0,
       status VARCHAR(20) DEFAULT 'active',
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
@@ -275,6 +309,10 @@ await pool.query(`
 await pool.query(`ALTER TABLE dapps ADD COLUMN IF NOT EXISTS project_type VARCHAR(50)`).catch(() => {});
 
 await pool.query(`ALTER TABLE dapps ADD COLUMN IF NOT EXISTS description TEXT`).catch(() => {});
+
+await pool.query(`ALTER TABLE dapps ADD COLUMN IF NOT EXISTS free_tier_requests INTEGER DEFAULT 10`).catch(() => {});
+
+await pool.query(`ALTER TABLE dapps ADD COLUMN IF NOT EXISTS free_tier_used INTEGER DEFAULT 0`).catch(() => {});
   
   await pool.query(`
     CREATE TABLE IF NOT EXISTS transactions (
@@ -293,7 +331,7 @@ await pool.query(`ALTER TABLE dapps ADD COLUMN IF NOT EXISTS description TEXT`).
     CREATE TABLE IF NOT EXISTS deposits (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       dapp_id UUID REFERENCES dapps(id),
-      amount_wei BIGINT NOT NULL,
+      amount_wei NUMERIC NOT NULL,
       tx_hash VARCHAR(66) UNIQUE NOT NULL,
       status VARCHAR(20) DEFAULT 'pending',
       created_at TIMESTAMP DEFAULT NOW(),
