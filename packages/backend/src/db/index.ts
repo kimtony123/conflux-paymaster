@@ -135,7 +135,7 @@ export async function checkAndUseFreeTier(dappId: string): Promise<{ allowed: bo
   const remaining = (free_tier_requests || 10) - (free_tier_used || 0);
   
   if (remaining <= 0) {
-    return { allowed: false, remaining: 0, isFree: true };
+    return { allowed: false, remaining: 0, isFree: false };  // Free tier exhausted - use balance
   }
   
   return { allowed: true, remaining, isFree: true };

@@ -32,7 +32,7 @@ const TEST_CONFIG = {
   amountToTransfer: ethers.parseUnits("0.000001", 6), // Transfer 0.000001 USDT to show it works
   useRelayer: true,
   // API key for dApp tracking (get from dashboard after login)
-  apiKey: process.env.API_KEY || "cfpm_sk_821c3f6115974a0baef8a577b9e2ea30",
+  apiKey: process.env.API_KEY || "cfpm_sk_6c1f36263fa54f19bfc0eb8fdf351281",
 };
 
 const USDT_ABI = [
@@ -46,7 +46,7 @@ async function main() {
   console.log("=".repeat(60));
 
   const network = new Network("conflux-testnet", 71);
-  const provider = new ethers.JsonRpcProvider(TEST_CONFIG.rpcUrl, network, { staticNetwork: network });
+  const provider = new ethers.JsonRpcProvider(TEST_CONFIG.rpcUrl);
   const senderWallet = new ethers.Wallet(TEST_CONFIG.senderPrivateKey, provider);
 
   console.log("\n[1] Sender Wallet");

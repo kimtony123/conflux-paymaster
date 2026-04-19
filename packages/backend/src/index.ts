@@ -328,15 +328,6 @@ app.post("/api/v1/relay", async (req: Request, res: Response) => {
       userOperation.signature,
     ];
 
-    const relayerBalanceStart = Date.now();
-    const relayerBalance = await provider.getBalance(relayerWallet.address);
-    console.log(`[Relayer] getBalance took ${Date.now() - relayerBalanceStart}ms, balance: ${ethers.formatEther(relayerBalance)} CFX`);
-    
-    if (relayerBalance < ethers.parseEther("0.01")) {
-      console.error("[Relayer] Insufficient CFX!");
-      return res.status(503).json({ error: "Relayer has insufficient CFX" });
-    }
-
     console.log(`[Relayer] Submitting to EntryPoint...`);
 
     const EntryPointIface = new ethers.Interface([
@@ -468,6 +459,19 @@ app.listen(PORT, async () => {
   console.log(`   Listening on http://localhost:${PORT}`);
   console.log(`   Free tier: 10 transactions per API key`);
   console.log(`   Paid: Deductions from dApp balance\n`);
+});
+
+app.post("/api/debug/reset-db", async (req: Request, res: Response) => {
+  try {
+    if (!db.pool) return res.status(500).json({ error: "No database" });
+    
+    // Reset all tables
+    await db.pool.query("TRUNCATE transactions, deposits, dapps RESTART IDENTITY CASCADE");
+    
+    res.json({ success: true, message: "Database reset - all data cleared" });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default app;
