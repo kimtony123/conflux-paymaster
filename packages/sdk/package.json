@@ -1,11 +1,8 @@
 {
-  "publishConfig": {
-    "registry": "https://registry.npmjs.org/",
-    "access": "public"
-  },
-  "name": "conflux-paymaster-sdk",
-  "version": "1.0.0",
+  "name": "@conflux-paymaster/conflux-paymaster-sdk",
+  "version": "0.1.0",
   "description": "Gasless transactions SDK for Conflux eSpace",
+  "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -23,7 +20,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src --ext .ts",
+    "publish:jsr": "jsr publish"
   },
   "dependencies": {
     "ethers": "^6.9.0"

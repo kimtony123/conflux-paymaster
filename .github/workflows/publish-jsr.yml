@@ -1,0 +1,31 @@
+name: Publish to JSR
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+          
+      - name: Build SDK
+        run: |
+          cd packages/sdk
+          npm run build
+          
+      - name: Publish to JSR
+        run: |
+          cd packages/sdk
+          npx jsr publish
