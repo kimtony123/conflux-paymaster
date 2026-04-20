@@ -2,6 +2,7 @@
   "name": "@conflux-paymaster/conflux-paymaster-sdk",
   "version": "0.1.0",
   "description": "Gasless transactions SDK for Conflux eSpace",
+  "description": "Gasless transactions SDK for Conflux eSpace",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
