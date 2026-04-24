@@ -1,4 +1,4 @@
-import { ethers } from "ethers";
+import { ethers, Network } from "ethers";
 import {
   PaymasterConfig,
   SponsoredTransaction,
@@ -10,6 +10,7 @@ import {
   UserOpReceipt,
   ENTRY_POINT_ADDRESS,
   DEFAULT_BUNDLER_URLS,
+  WalletSigner,
 } from "./types.js";
 
 export class ConfluxPaymaster {
@@ -22,6 +23,7 @@ export class ConfluxPaymaster {
   private apiKey?: string;
   private provider: ethers.JsonRpcProvider;
   private signer?: ethers.Wallet;
+  private walletSigner?: WalletSigner;
   private factoryAddress?: string;
   
   // Performance optimizations
@@ -37,7 +39,10 @@ export class ConfluxPaymaster {
     this.bundlerUrl = config.bundlerUrl || this.getDefaultBundlerUrl();
     this.entryPointAddress = config.entryPointAddress || ENTRY_POINT_ADDRESS;
     this.apiKey = config.apiKey;
-    this.provider = new ethers.JsonRpcProvider(config.rpcUrl);
+    console.log("🔧 Creating provider with chainId:", config.chainId);
+    const network = new Network(config.chainId === 71 ? 'conflux-testnet' : 'conflux', config.chainId);
+    this.provider = new ethers.JsonRpcProvider(config.rpcUrl, network, { staticNetwork: true });
+    console.log("🔧 Provider created with static network");
   }
 
   private getHeaders(): Record<string, string> {
@@ -56,6 +61,27 @@ export class ConfluxPaymaster {
 
   async connect(privateKey: string): Promise<void> {
     this.signer = new ethers.Wallet(privateKey, this.provider);
+  }
+
+  /**
+   * Connect using a wallet (MetaMask, WalletConnect, Web3Auth, etc.)
+   * The wallet must be able to sign messages via signMessage()
+   */
+  async connectWallet(wallet: WalletSigner): Promise<void> {
+    this.walletSigner = wallet;
+  }
+
+  /**
+   * Get the connected wallet address
+   */
+  getAddress(): string {
+    if (this.walletSigner) {
+      return this.walletSigner.address;
+    }
+    if (this.signer) {
+      return this.signer.address;
+    }
+    throw new Error("No wallet connected. Call connect() or connectWallet() first.");
   }
 
   async setFactory(factoryAddress: string): Promise<void> {
@@ -80,24 +106,37 @@ export class ConfluxPaymaster {
     return iface.decodeFunctionResult("getAddress", result)[0] as string;
   }
 
-  async getOrCreateAccount(config?: SmartAccountConfig): Promise<string> {
-    if (!this.signer) {
-      throw new Error("Call connect() first with a private key");
+  async getOrCreateAccount(config?: SmartAccountConfig): Promise<{ accountAddress: string; initCode: string }> {
+    if (!this.signer && !this.walletSigner) {
+      throw new Error("Call connect() or connectWallet() first");
     }
 
-    const owner = config?.owner || this.signer.address;
+    console.log("📝 getOrCreateAccount - checking provider network:", (this.provider as any).network);
+    const owner = config?.owner || this.getAddress();
     const salt = config?.index || 0n;
 
+    console.log("📝 getSmartAccountAddress...");
     const accountAddress = await this.getSmartAccountAddress(owner, salt);
+    console.log("📝 getCode...");
     const code = await this.provider.getCode(accountAddress);
 
     if (code && code !== "0x") {
-      return accountAddress;
+      return { accountAddress, initCode: "0x" };
     }
 
-    throw new Error(
-      `Account not deployed at ${accountAddress}. Please fund this address with CFX for deployment.`
-    );
+    // Account not deployed - create initCode for factory to deploy it
+    if (!this.factoryAddress) {
+      throw new Error("Factory address not set. Call setFactory() first.");
+    }
+    
+    const factoryIface = new ethers.Interface([
+      "function createAccount(address owner, uint256 salt) returns (address)"
+    ]);
+    const initData = factoryIface.encodeFunctionData("createAccount", [owner, salt]);
+    const factoryBytes = ethers.getBytes(this.factoryAddress as string);
+    const initCode = ethers.hexlify(ethers.concat([factoryBytes, initData]));
+
+    return { accountAddress, initCode };
   }
 
   async getGasPrice(forceRefresh = false): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
@@ -126,6 +165,7 @@ export class ConfluxPaymaster {
 
   async buildUserOperation(
     sender: string,
+    initCode: string,
     to: string,
     data: string,
     value: bigint
@@ -141,7 +181,7 @@ export class ConfluxPaymaster {
     return {
       sender,
       nonce,
-      initCode: "0x",
+      initCode: initCode || "0x",
       callData,
       callGasLimit: 200000n,
       verificationGasLimit: 200000n,
@@ -206,8 +246,8 @@ export class ConfluxPaymaster {
   }
 
   async signUserOperation(userOp: UserOperation): Promise<string> {
-    if (!this.signer) {
-      throw new Error("Call connect() first with a private key");
+    if (!this.signer && !this.walletSigner) {
+      throw new Error("Call connect() or connectWallet() first");
     }
 
     const packed = ethers.solidityPacked(
@@ -245,7 +285,12 @@ export class ConfluxPaymaster {
       ])
     );
 
-    const signature = await this.signer.signMessage(ethers.getBytes(finalHash));
+    let signature: string;
+    if (this.walletSigner) {
+      signature = await this.walletSigner.signMessage(ethers.getBytes(finalHash));
+    } else {
+      signature = await this.signer!.signMessage(ethers.getBytes(finalHash));
+    }
     return signature;
   }
 
@@ -307,15 +352,16 @@ export class ConfluxPaymaster {
   }
 
   async sendTransaction(tx: SponsoredTransaction): Promise<SponsoredTransactionResult> {
-    if (!this.signer) {
-      throw new Error("Call connect() first with a private key");
+    if (!this.signer && !this.walletSigner) {
+      throw new Error("Call connect() or connectWallet() first");
     }
 
     // Optimize: Parallel account check + nonce/gas fetch
-    const accountAddress = await this.getOrCreateAccount();
+    const { accountAddress, initCode } = await this.getOrCreateAccount();
 
     let userOp = await this.buildUserOperation(
       accountAddress,
+      initCode,
       tx.to,
       tx.data || "0x",
       tx.value || 0n
@@ -349,15 +395,16 @@ export class ConfluxPaymaster {
    * Combines signing + relayer in one flow
    */
   async sendViaRelayer(tx: SponsoredTransaction): Promise<SponsoredTransactionResult> {
-    if (!this.signer) {
-      throw new Error("Call connect() first with a private key");
+    if (!this.signer && !this.walletSigner) {
+      throw new Error("Call connect() or connectWallet() first");
     }
 
-    const accountAddress = await this.getOrCreateAccount();
+    const { accountAddress, initCode } = await this.getOrCreateAccount();
 
     // Build UserOp
     let userOp = await this.buildUserOperation(
       accountAddress,
+      initCode,
       tx.to,
       tx.data || "0x",
       tx.value || 0n

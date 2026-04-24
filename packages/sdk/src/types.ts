@@ -89,6 +89,15 @@ export interface SDKError extends Error {
   details?: any;
 }
 
+export interface WalletSigner {
+  /** The EOA address of the wallet */
+  address: string;
+  /** Sign a message (ERC-191) - used for signing UserOp hash */
+  signMessage: (message: string | Uint8Array) => Promise<string>;
+}
+
+export type UserSigner = WalletSigner | string; // string = private key
+
 export const ENTRY_POINT_ADDRESS = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
 
 export const DEFAULT_BUNDLER_URLS: Record<ConfluxChain, string> = {

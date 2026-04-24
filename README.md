@@ -63,6 +63,36 @@ The Conflux Paymaster SDK provides a **complete, production-ready abstraction la
 | **Bundler Agnostic**         | Use public bundlers for development or point to your own Alto instance.            |
 | **Modular Backend Signer**   | Reference implementation for the required signature service included.              |
 | **Wallet Flexible**          | Works with private keys, browser wallets (MetaMask), or Web3Auth embedded wallets. |
+| **Developer Portal**         | Sign up, deposit CFX, get API keys, track usage.                                   |
+
+---
+
+## 🔐 Developer Portal
+
+Get your API keys at [https://conflux-paymaster-docs.vercel.app](https://conflux-paymaster-docs.vercel.app)
+
+The Developer Portal allows developers to:
+- **Sign Up / Login** - Create your account
+- **Deposit CFX** - Fund your paymaster account
+- **Get API Keys** - Obtain your unique API key for the SDK
+- **Track Usage** - Monitor your transaction usage and balance
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              DEVELOPER PORTAL                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
+│  │   Sign Up   │  │  Deposit   │  │  Get API    │    │
+│  │   / Login   │→ │    CFX      │→ │    Keys     │    │
+│  └─────────────┘  └─────────────┘  └─────────────┘    │
+│                         ↓                               │
+│                  ┌─────────────┐                       │
+│                  │   Dashboard │                       │
+│                  │ - Usage Stats│                       │
+│                  │ - API Keys   │                       │
+│                  │ - Balance    │                       │
+│                  └─────────────┘                       │
+└─────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -121,8 +151,20 @@ The Conflux Paymaster SDK provides a **complete, production-ready abstraction la
 
 ## 📦 Installation
 
+### npm
+
 ```bash
-npm install @conflux-paymaster/sdk viem
+npm install @conflux-paymaster/sdk viem ethers
+```
+
+### JSR (Deno/Bun)
+
+```bash
+# Bun
+bun add @conflux-paymaster/conflux-paymaster-sdk
+
+# Deno
+deno add @conflux-paymaster/conflux-paymaster-sdk
 ```
 
 ---
@@ -184,6 +226,123 @@ console.log(`Tx Hash: ${result.txHash}`); // After inclusion
 ```
 
 That's it. The user never sees a gas fee prompt.
+
+---
+
+## 🖥️ Running Locally
+
+This guide explains how to run the Conflux Paymaster system locally for development and testing.
+
+### Prerequisites
+
+- Node.js 18+
+- npm or bun
+- Git
+
+### 1. Clone and Install
+
+```bash
+git clone https://github.com/conflux-paymaster/conflux-paymaster.git
+cd conflux-paymaster
+npm install
+```
+
+### 2. Configure Environment
+
+Create `.env` files for the packages you need:
+
+**Backend (.env):**
+```bash
+# packages/backend/.env
+PAYMASTER_ADDRESS=0x0cDE16Cf1fD5Bf2536069Aec8a2eF0832A27577B
+SIGNER_PRIVATE_KEY=0x...your-private-key
+CONFLUX_RPC_URL=https://evmtestnet.confluxrpc.com
+CHAIN_ID=71
+API_KEY=your-api-key
+```
+
+**SDK Test (.env):**
+```bash
+# packages/sdk/test/.env (or conflux-test/)
+RPC_URL=https://evmtestnet.confluxrpc.com
+PAYMASTER_ADDRESS=0x0cDE16Cf1fD5Bf2536069Aec8a2eF0832A27577B
+SIGNING_SERVICE_URL=http://localhost:3001
+```
+
+### 3. Run the Backend
+
+```bash
+cd packages/backend
+npm install  # if not done
+npm run dev
+```
+
+The backend should start on `http://localhost:3001`. Use `--watch` flag:
+```bash
+npm run dev -- --watch
+```
+
+### 4. Run SDK Tests
+
+We provide a test project at `/conflux-test/` showing how to integrate:
+
+```bash
+# From the conflux-paymaster repo root:
+cd ../conflux-test  # or: cd /home/tony/conflux-test
+
+# Run the test file
+node test/gasless-transfer.ts
+```
+
+Or run directly with bun/node:
+```bash
+bun test/gasless-transfer.ts
+# or
+node test/gasless-transfer.ts
+```
+
+**Test file example:**
+```typescript
+import { ConfluxPaymaster } from "@conflux-paymaster/sdk";
+
+const paymaster = new ConfluxPaymaster({
+  rpcUrl: "https://evmtestnet.confluxrpc.com",
+  paymasterAddress: "0x0cDE16Cf1fD5Bf2536069Aec8a2eF0832A27577B",
+  signingServiceUrl: "http://localhost:3001",
+  chainId: 71,
+  apiKey: "your-api-key",
+});
+
+await paymaster.connect("0xUSER_PRIVATE_KEY");
+await paymaster.setFactory("0xFactoryAddress");
+
+const result = await paymaster.sendTransaction({
+  to: "0xRecipient",
+  data: "0x",
+  value: 1n * 10n**18n, // 1 CFX
+});
+
+console.log("UserOp Hash:", result.userOpHash);
+```
+
+### 5. (Optional) Deploy Contracts
+
+If you need to deploy your own contracts to testnet:
+
+```bash
+cd packages/contracts
+cp .env.example .env
+# Edit .env with your private key
+npm run deploy:testnet
+```
+
+### Deployed Testnet Addresses
+
+| Contract | Address |
+|----------|---------|
+| EntryPoint | `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789` |
+| SimpleAccountFactory | `0x3d536eA50c323fFA2bc6b7DF0c1AE253f6144eAE` |
+| VerifyingPaymaster | `0x0cDE16Cf1fD5Bf2536069Aec8a2eF0832A27577B` |
 
 ---
 
