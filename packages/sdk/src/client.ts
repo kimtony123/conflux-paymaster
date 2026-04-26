@@ -7,9 +7,7 @@ import {
   UserOperation,
   PaymasterQuote,
   PaymasterSignResponse,
-  UserOpReceipt,
   ENTRY_POINT_ADDRESS,
-  DEFAULT_BUNDLER_URLS,
   WalletSigner,
 } from "./types.js";
 
@@ -18,7 +16,6 @@ export class ConfluxPaymaster {
   private paymasterAddress: string;
   private signingServiceUrl: string;
   private chainId: number;
-  private bundlerUrl: string;
   private entryPointAddress: string;
   private apiKey?: string;
   private provider: ethers.JsonRpcProvider;
@@ -26,23 +23,19 @@ export class ConfluxPaymaster {
   private walletSigner?: WalletSigner;
   private factoryAddress?: string;
   
-  // Performance optimizations
   private cachedGasPrice?: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; timestamp: number };
-  private readonly GAS_CACHE_TTL = 15000; // 15 seconds cache
-  private readonly gasPriceCache = new Map<string, { value: bigint; expiry: number }>();
+  private readonly GAS_CACHE_TTL = 15000;
 
   constructor(config: PaymasterConfig) {
     this.rpcUrl = config.rpcUrl;
     this.paymasterAddress = config.paymasterAddress;
     this.signingServiceUrl = config.signingServiceUrl;
     this.chainId = config.chainId;
-    this.bundlerUrl = config.bundlerUrl || this.getDefaultBundlerUrl();
     this.entryPointAddress = config.entryPointAddress || ENTRY_POINT_ADDRESS;
     this.apiKey = config.apiKey;
-    console.log("🔧 Creating provider with chainId:", config.chainId);
+    
     const network = new Network(config.chainId === 71 ? 'conflux-testnet' : 'conflux', config.chainId);
     this.provider = new ethers.JsonRpcProvider(config.rpcUrl, network, { staticNetwork: true });
-    console.log("🔧 Provider created with static network");
   }
 
   private getHeaders(): Record<string, string> {
@@ -53,27 +46,14 @@ export class ConfluxPaymaster {
     return headers;
   }
 
-  private getDefaultBundlerUrl(): string {
-    return this.chainId === 71 
-      ? DEFAULT_BUNDLER_URLS.testnet 
-      : DEFAULT_BUNDLER_URLS.mainnet;
-  }
-
   async connect(privateKey: string): Promise<void> {
     this.signer = new ethers.Wallet(privateKey, this.provider);
   }
 
-  /**
-   * Connect using a wallet (MetaMask, WalletConnect, Web3Auth, etc.)
-   * The wallet must be able to sign messages via signMessage()
-   */
   async connectWallet(wallet: WalletSigner): Promise<void> {
     this.walletSigner = wallet;
   }
 
-  /**
-   * Get the connected wallet address
-   */
   getAddress(): string {
     if (this.walletSigner) {
       return this.walletSigner.address;
@@ -82,6 +62,10 @@ export class ConfluxPaymaster {
       return this.signer.address;
     }
     throw new Error("No wallet connected. Call connect() or connectWallet() first.");
+  }
+
+  getSenderAddress(): string {
+    return this.getAddress();
   }
 
   async setFactory(factoryAddress: string): Promise<void> {
@@ -111,20 +95,16 @@ export class ConfluxPaymaster {
       throw new Error("Call connect() or connectWallet() first");
     }
 
-    console.log("📝 getOrCreateAccount - checking provider network:", (this.provider as any).network);
     const owner = config?.owner || this.getAddress();
     const salt = config?.index || 0n;
 
-    console.log("📝 getSmartAccountAddress...");
     const accountAddress = await this.getSmartAccountAddress(owner, salt);
-    console.log("📝 getCode...");
     const code = await this.provider.getCode(accountAddress);
 
     if (code && code !== "0x") {
       return { accountAddress, initCode: "0x" };
     }
 
-    // Account not deployed - create initCode for factory to deploy it
     if (!this.factoryAddress) {
       throw new Error("Factory address not set. Call setFactory() first.");
     }
@@ -163,14 +143,13 @@ export class ConfluxPaymaster {
     };
   }
 
-  async buildUserOperation(
+  private async buildUserOperation(
     sender: string,
     initCode: string,
     to: string,
     data: string,
     value: bigint
   ): Promise<UserOperation> {
-    // Optimize: fetch nonce and gas price in parallel
     const [nonce, gasPrice] = await Promise.all([
       this.getNonce(sender),
       this.getGasPrice(),
@@ -183,7 +162,7 @@ export class ConfluxPaymaster {
       nonce,
       initCode: initCode || "0x",
       callData,
-      callGasLimit: 200000n,
+      callGasLimit: 1500000n,
       verificationGasLimit: 200000n,
       preVerificationGas: 50000n,
       maxFeePerGas: gasPrice.maxFeePerGas,
@@ -214,7 +193,7 @@ export class ConfluxPaymaster {
     return iface.encodeFunctionData("execute", [target, value, data]);
   }
 
-  async fetchPaymasterSignature(userOp: UserOperation): Promise<string> {
+  private async fetchPaymasterSignature(userOp: UserOperation): Promise<string> {
     const response = await fetch(`${this.signingServiceUrl}/api/paymaster/sign`, {
       method: "POST",
       headers: this.getHeaders(),
@@ -245,7 +224,7 @@ export class ConfluxPaymaster {
     return data.paymasterAndData;
   }
 
-  async signUserOperation(userOp: UserOperation): Promise<string> {
+  private async signUserOperation(userOp: UserOperation): Promise<string> {
     if (!this.signer && !this.walletSigner) {
       throw new Error("Call connect() or connectWallet() first");
     }
@@ -294,69 +273,11 @@ export class ConfluxPaymaster {
     return signature;
   }
 
-  async sendToBundler(userOp: UserOperation): Promise<string> {
-    const response = await fetch(this.bundlerUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_sendUserOperation",
-        params: [userOp, this.entryPointAddress],
-      }),
-    });
-
-    const data = (await response.json()) as {
-      result?: string;
-      error?: { message: string };
-    };
-
-    if (data.error) {
-      throw new Error(`Bundler error: ${data.error.message}`);
-    }
-
-    return data.result!;
-  }
-
-  async getUserOperationReceipt(userOpHash: string): Promise<UserOpReceipt | null> {
-    const response = await fetch(this.bundlerUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_getUserOperationReceipt",
-        params: [userOpHash],
-      }),
-    });
-
-    const data = (await response.json()) as { result?: UserOpReceipt };
-    return data.result || null;
-  }
-
-  async waitForUserOperationReceipt(
-    userOpHash: string,
-    timeout: number = 60000
-  ): Promise<UserOpReceipt> {
-    const start = Date.now();
-    
-    while (Date.now() - start < timeout) {
-      const receipt = await this.getUserOperationReceipt(userOpHash);
-      if (receipt) {
-        return receipt;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-    }
-    
-    throw new Error("Timeout waiting for UserOperation receipt");
-  }
-
   async sendTransaction(tx: SponsoredTransaction): Promise<SponsoredTransactionResult> {
     if (!this.signer && !this.walletSigner) {
       throw new Error("Call connect() or connectWallet() first");
     }
 
-    // Optimize: Parallel account check + nonce/gas fetch
     const { accountAddress, initCode } = await this.getOrCreateAccount();
 
     let userOp = await this.buildUserOperation(
@@ -367,58 +288,12 @@ export class ConfluxPaymaster {
       tx.value || 0n
     );
 
-    // Optimize: Fetch paymaster signature in parallel with other prep
     const paymasterAndData = await this.fetchPaymasterSignature(userOp);
     userOp.paymasterAndData = paymasterAndData;
 
     const signature = await this.signUserOperation(userOp);
     userOp.signature = signature;
 
-    const userOpHash = await this.sendToBundler(userOp);
-
-    let receipt: UserOpReceipt | null = null;
-    try {
-      receipt = await this.waitForUserOperationReceipt(userOpHash);
-    } catch (error) {
-      console.warn("Could not wait for receipt:", error);
-    }
-
-    return {
-      userOpHash,
-      txHash: receipt?.txHash,
-      success: receipt?.success ?? true,
-    };
-  }
-  
-  /**
-   * Optimized: Send using relayer service (recommended for Conflux)
-   * Combines signing + relayer in one flow
-   */
-  async sendViaRelayer(tx: SponsoredTransaction): Promise<SponsoredTransactionResult> {
-    if (!this.signer && !this.walletSigner) {
-      throw new Error("Call connect() or connectWallet() first");
-    }
-
-    const { accountAddress, initCode } = await this.getOrCreateAccount();
-
-    // Build UserOp
-    let userOp = await this.buildUserOperation(
-      accountAddress,
-      initCode,
-      tx.to,
-      tx.data || "0x",
-      tx.value || 0n
-    );
-
-    // Get paymaster signature
-    const paymasterAndData = await this.fetchPaymasterSignature(userOp);
-    userOp.paymasterAndData = paymasterAndData;
-
-    // Sign UserOp
-    const signature = await this.signUserOperation(userOp);
-    userOp.signature = signature;
-
-    // Send via relayer
     const response = await fetch(`${this.signingServiceUrl}/api/v1/relay`, {
       method: "POST",
       headers: this.getHeaders(),
@@ -449,8 +324,6 @@ export class ConfluxPaymaster {
       success: boolean;
       userOpHash: string;
       transactionHash: string;
-      blockNumber: number;
-      gasUsed: number;
     };
 
     return {
@@ -476,7 +349,6 @@ export class ConfluxPaymaster {
       paymasterAddress: this.paymasterAddress,
       signingServiceUrl: this.signingServiceUrl,
       chainId: this.chainId as 71 | 1030,
-      bundlerUrl: this.bundlerUrl,
       entryPointAddress: this.entryPointAddress,
       apiKey: this.apiKey,
     };

@@ -20,7 +20,7 @@ const TEST_CONFIG = {
   rpcUrl: "https://evmtestnet.confluxrpc.com",
   chainId: 71,
   paymasterAddress: "0x0cDE16Cf1fD5Bf2536069Aec8a2eF0832A27577B",
-  factoryAddress: "0x3d536eA50c323fFA2bc6b7DF0c1AE253f6144eAE", // FactoryV07
+  factoryAddress: "0x011497Bb8E0DEbBD3cde2408D75D0d3504d12E7e", // Newly deployed factory
   // Use local backend by default
   signingServiceUrl: process.env.BACKEND_URL || "http://localhost:3001",
   relayerServiceUrl: process.env.BACKEND_URL || "http://localhost:3001",

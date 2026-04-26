@@ -3,9 +3,7 @@ export interface PaymasterConfig {
   paymasterAddress: string;
   signingServiceUrl: string;
   chainId: 71 | 1030;
-  bundlerUrl?: string;
   entryPointAddress?: string;
-  /** API key for tracking usage to your dApp (from dashboard) */
   apiKey?: string;
 }
 
@@ -40,11 +38,6 @@ export interface UserOperation {
   signature: string;
 }
 
-export interface GasPrice {
-  maxFeePerGas: bigint;
-  maxPriorityFeePerGas: bigint;
-}
-
 export interface PaymasterQuote {
   maxFeePerGas: string;
   maxPriorityFeePerGas: string;
@@ -59,53 +52,16 @@ export interface PaymasterSignResponse {
   remaining: number;
 }
 
-export interface BundlerResponse {
-  jsonrpc: string;
-  id: number;
-  result?: string;
-  error?: {
-    code: number;
-    message: string;
-  };
-}
-
-export interface UserOpReceipt {
-  userOpHash: string;
-  success: boolean;
-  txHash: string;
-  gasUsed: string;
-  actualGasUsed: string;
-  logs: Array<{
-    address: string;
-    topics: string[];
-    data: string;
-  }>;
-}
-
-export type ConfluxChain = "testnet" | "mainnet";
-
-export interface SDKError extends Error {
-  code?: number;
-  details?: any;
-}
-
 export interface WalletSigner {
-  /** The EOA address of the wallet */
   address: string;
-  /** Sign a message (ERC-191) - used for signing UserOp hash */
   signMessage: (message: string | Uint8Array) => Promise<string>;
 }
 
-export type UserSigner = WalletSigner | string; // string = private key
+export type UserSigner = WalletSigner | string;
 
 export const ENTRY_POINT_ADDRESS = "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789";
 
-export const DEFAULT_BUNDLER_URLS: Record<ConfluxChain, string> = {
-  testnet: "https://api.stackup.sh/v1/bundler/public",
-  mainnet: "https://api.stackup.sh/v1/bundler/public",
-};
-
-export const DEFAULT_RPC_URLS: Record<ConfluxChain, string> = {
+export const DEFAULT_RPC_URLS: Record<"testnet" | "mainnet", string> = {
   testnet: "https://evmtestnet.confluxrpc.com",
   mainnet: "https://evm.confluxrpc.com",
 };

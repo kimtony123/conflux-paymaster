@@ -197,6 +197,18 @@ app.post("/api/paymaster/sign", async (req: Request, res: Response) => {
     const { userOperation, userAddress } = validation.data;
     const apiKey = req.headers["x-api-key"] as string;
 
+    // DEBUG: Log paymaster sign request
+    console.log(`[DEBUG] ════════════════════════════════════════`);
+    console.log(`[DEBUG] 🖋️ PAYMASTER SIGN REQUEST`);
+    console.log(`[DEBUG] 📤 userAddress: ${userAddress}`);
+    console.log(`[DEBUG] 📬 UserOp.sender: ${userOperation.sender}`);
+    console.log(`[DEBUG] 📊 nonce: ${userOperation.nonce}`);
+    console.log(`[DEBUG] 🔧 initCode: ${userOperation.initCode?.slice(0, 20)}...`);
+    console.log(`[DEBUG] 📝 callData: ${userOperation.callData?.slice(0, 40)}...`);
+    console.log(`[DEBUG] ⛽ callGasLimit: ${userOperation.callGasLimit}`);
+    console.log(`[DEBUG] 🔑 API Key: ${apiKey?.slice(0, 15)}...`);
+    console.log(`[DEBUG] ════════════════════════════════════════`);
+
     const rateLimit = checkRateLimit(req);
     if (!rateLimit.allowed) {
       return res.status(429).json({ 
@@ -206,6 +218,7 @@ app.post("/api/paymaster/sign", async (req: Request, res: Response) => {
     }
 
     const userOpHash = getUserOpHash(userOperation);
+    console.log(`[DEBUG] 🧮 Computed UserOpHash: ${userOpHash}`);
 
     const validUntil = 0;
     const validAfter = 0;
@@ -316,6 +329,55 @@ app.post("/api/v1/relay", async (req: Request, res: Response) => {
 
     const { userOperation, userAddress } = validation.data;
 
+    // DEBUG: Log ALL UserOp details comprehensively
+    console.log(`[DEBUG] ╔══════════════════════════════════════╗`);
+    console.log(`[DEBUG] ║     COMPLETE USEROP TRANSACTION TRACE   ║`);
+    console.log(`[DEBUG] ╚══════════════════════════════════════╝`);
+    console.log(`[DEBUG] 📤 userAddress (from request): ${userAddress}`);
+    console.log(`[DEBUG] 📬 UserOp.sender: ${userOperation.sender}`);
+    console.log(`[DEBUG] 📊 UserOp.nonce: ${userOperation.nonce}`);
+    console.log(`[DEBUG] 🔧 UserOp.initCode: ${userOperation.initCode || '0x'}`);
+    console.log(`[DEBUG] 📝 UserOp.callData (full): ${userOperation.callData}`);
+    console.log(`[DEBUG] ⛽ UserOp.callGasLimit: ${userOperation.callGasLimit}`);
+    console.log(`[DEBUG] ⛽ UserOp.verificationGasLimit: ${userOperation.verificationGasLimit}`);
+    console.log(`[DEBUG] ⛽ UserOp.preVerificationGas: ${userOperation.preVerificationGas}`);
+    console.log(`[DEBUG] 💰 UserOp.maxFeePerGas: ${userOperation.maxFeePerGas}`);
+    console.log(`[DEBUG] 💰 UserOp.maxPriorityFeePerGas: ${userOperation.maxPriorityFeePerGas}`);
+    console.log(`[DEBUG] 🔏 UserOp.paymasterAndData: ${userOperation.paymasterAndData?.slice(0, 30)}...`);
+    console.log(`[DEBUG] ✍️ UserOp.signature: ${userOperation.signature?.slice(0, 30)}...`);
+    console.log(`[DEBUG] ════════════════════════════════════════`);
+
+    // Decode callData to show what's being executed
+    try {
+      const callDataBytes = ethers.getBytes(userOperation.callData || "0x");
+      if (callDataBytes.length >= 4) {
+        const methodId = userOperation.callData.slice(0, 10);
+        console.log(`[DEBUG] 🎯 Method ID being called: ${methodId}`);
+        
+        // Try to decode if it's the execute function
+        if (methodId === "0x4ce3158b") {
+          // execute(address,uint256,bytes)
+          const executeIface = new ethers.Interface(["function execute(address target, uint256 value, bytes data)"]);
+          try {
+            const decoded = executeIface.decodeFunctionData("execute", userOperation.callData);
+            console.log(`[DEBUG] 🎯 Execute target: ${decoded[0]}`);
+            console.log(`[DEBUG] 💵 Execute value: ${decoded[1]}`);
+            console.log(`[DEBUG] 📝 Execute data: ${decoded[2]}`);
+            
+            // If data is a method call, try to decode further
+            if (decoded[2] && decoded[2].length >= 10) {
+              const innerMethodId = decoded[2].slice(0, 10);
+              console.log(`[DEBUG] 🔶 Inner call method: ${innerMethodId}`);
+            }
+          } catch (e) {
+            console.log(`[DEBUG] ⚠️ Could not decode execute callData`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[DEBUG] ⚠️ Could not parse callData for debugging`);
+    }
+
     console.log(`[Relayer] Received UserOp from ${userAddress}`);
 
     const userOpPacked = [
@@ -332,6 +394,13 @@ app.post("/api/v1/relay", async (req: Request, res: Response) => {
       userOperation.signature,
     ];
 
+    // DEBUG: Verify sender matches userAddress
+    if (userOperation.sender.toLowerCase() !== userAddress.toLowerCase()) {
+      console.log(`[WARN] ⚠️ MISMATCH! sender=${userOperation.sender} but userAddress=${userAddress}`);
+    } else {
+      console.log(`[DEBUG] ✅ sender matches userAddress: ${userAddress}`);
+    }
+
     console.log(`[Relayer] Submitting to EntryPoint...`);
 
     const EntryPointIface = new ethers.Interface([
@@ -341,11 +410,20 @@ app.post("/api/v1/relay", async (req: Request, res: Response) => {
     const txData = EntryPointIface.encodeFunctionData("handleOps", [[userOpPacked], relayerWallet.address]);
     console.log(`[Relayer] Encoding done, sending tx...`);
     
+    // Dynamic gas limit: sum of all UserOp gas limits + 200k buffer for EntryPoint overhead
+    const callGas = BigInt(userOperation.callGasLimit || "0");
+    const verificationGas = BigInt(userOperation.verificationGasLimit || "0");
+    const preVerificationGas = BigInt(userOperation.preVerificationGas || "0");
+    const bufferGas = 200000n; // Buffer for EntryPoint execution overhead
+    const totalGasLimit = callGas + verificationGas + preVerificationGas + bufferGas;
+    
+    console.log(`[Relayer] Gas estimate: call=${callGas}, verify=${verificationGas}, preVerify=${preVerificationGas}, total=${totalGasLimit}`);
+    
     const sendStart = Date.now();
     const tx = await relayerWallet.sendTransaction({
       to: ENTRY_POINT_ADDRESS,
       data: txData,
-      gasLimit: 500000,
+      gasLimit: Number(totalGasLimit),
     });
     const sendEnd = Date.now();
     console.log(`[Relayer] sendTransaction took ${sendEnd - sendStart}ms`);

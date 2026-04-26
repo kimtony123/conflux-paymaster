@@ -18,7 +18,7 @@ The **Conflux Paymaster SDK** is an open-source TypeScript library that enables 
 
 **The Mission:** Make blockchain interactions invisible. Users should focus on what they want to do—buy stablecoins, trade NFTs, play games—not on acquiring gas tokens.
 
-**How It Works:** The SDK wraps complex ERC-4337 operations into a simple, promise-based API. It handles smart account creation, UserOperation construction, bundler communication, and paymaster signature orchestration.
+**How It Works:** The SDK wraps complex ERC-4337 operations into a simple, promise-based API. It handles smart account creation, UserOperation construction, relayer submission, and paymaster signature orchestration.
 
 ---
 
@@ -31,7 +31,7 @@ For developers building on Conflux eSpace, user onboarding is broken:
 1.  **The CFX Requirement**: Every new user must acquire CFX from an exchange or faucet before they can perform their first transaction. This creates immediate friction and drop-off.
 2.  **Conceptual Overload**: Users are forced to understand "gas," "gwei," and "network fees" before they've even experienced the dApp's value.
 3.  **Missed Opportunities**: For fintechs like AxPesa, this barrier prevents African users from seamlessly buying stablecoins with mobile money. The user journey stalls at "Insufficient CFX balance."
-4.  **Complexity for Developers**: Implementing gas sponsorship from scratch requires deep knowledge of ERC-4337, bundler infrastructure, and secure key management.
+4.  **Complexity for Developers**: Implementing gas sponsorship from scratch requires deep knowledge of ERC-4337, relayer infrastructure, and secure key management.
 
 ### Who Benefits
 
@@ -50,7 +50,7 @@ The Conflux Paymaster SDK provides a **complete, production-ready abstraction la
 
 - **Simple**: A single `sendTransaction` method replaces hundreds of lines of custom code.
 - **Secure**: Sensitive paymaster signing keys live in a backend service, never exposed to the client.
-- **Flexible**: Works with any ERC-4337 smart account and supports custom bundler configurations.
+- **Flexible**: Works with any ERC-4337 smart account and supports custom relayer configurations.
 - **Conflux Native**: Pre-configured for Conflux eSpace testnet (71) and mainnet (1030).
 
 ### Core Features
@@ -60,7 +60,7 @@ The Conflux Paymaster SDK provides a **complete, production-ready abstraction la
 | **Gasless Transactions**     | Send transactions where the dApp pays the CFX gas fee.                             |
 | **Smart Account Management** | Automatically create or retrieve ERC-4337 smart accounts for users.                |
 | **TypeScript First**         | Full type safety and IntelliSense support.                                         |
-| **Bundler Agnostic**         | Use public bundlers for development or point to your own Alto instance.            |
+| **Built-in Relayer**        | Backend relayer submits UserOps directly - no external bundler needed.            |
 | **Modular Backend Signer**   | Reference implementation for the required signature service included.              |
 | **Wallet Flexible**          | Works with private keys, browser wallets (MetaMask), or Web3Auth embedded wallets. |
 | **Developer Portal**         | Sign up, deposit CFX, get API keys, track usage.                                   |
